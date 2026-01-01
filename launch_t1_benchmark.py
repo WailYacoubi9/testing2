@@ -8,11 +8,11 @@ import time
 import os
 import sys
 
-# Configuration (identique à benchmark_job.sh)
+# Configuration
 TARGET_CLUSTER = "nova"
 NODES = 2                    # 2 nodes = 1 master + 1 worker
-WALLTIME = "00:15:00"
-ITERATIONS = 3               # Même nombre que benchmark_job.sh
+WALLTIME = "01:00:00"        # 1 heure pour 30 itérations
+ITERATIONS = 30              # Minimum pour significativité statistique
 INPUT_FILE = "huge_input.txt"  # Même fichier que benchmark_job.sh
 
 HOME_DIR = os.environ['HOME']
@@ -78,15 +78,45 @@ echo "=== Résultats T(1) ==="
 cat "$CSV_FILE"
 echo ""
 
-# Calculer les moyennes
-echo "=== Moyennes ==="
-AVG_TOTAL=$(tail -n {ITERATIONS} "$CSV_FILE" | awk -F',' '{{sum+=$5}} END {{printf "%.0f", sum/{ITERATIONS}}}')
-AVG_SPLIT=$(tail -n {ITERATIONS} "$CSV_FILE" | awk -F',' '{{sum+=$3}} END {{printf "%.0f", sum/{ITERATIONS}}}')
-AVG_EXEC=$(tail -n {ITERATIONS} "$CSV_FILE" | awk -F',' '{{sum+=($5-$4)}} END {{printf "%.0f", sum/{ITERATIONS}}}')
+# Calculer les statistiques (moyenne, écart-type, intervalle de confiance 95%)
+echo "=== Statistiques (n={ITERATIONS}) ==="
 
-echo "T(1) Total moyen:     ${{AVG_TOTAL}} ms"
-echo "T(1) Split moyen:     ${{AVG_SPLIT}} ms"
-echo "T(1) Exec moyen:      ${{AVG_EXEC}} ms  <-- Pour le modèle théorique"
+# Fonction awk pour calculer mean, std, IC95
+calc_stats() {{
+    awk -F',' -v col=$1 'NR>1 {{
+        sum += $col
+        sumsq += ($col)^2
+        n++
+    }} END {{
+        mean = sum/n
+        std = sqrt(sumsq/n - mean^2)
+        ic95 = 1.96 * std / sqrt(n)
+        printf "%.1f ± %.1f (IC95: [%.1f, %.1f])\\n", mean, std, mean-ic95, mean+ic95
+    }}'
+}}
+
+echo -n "T(1) Total:  "
+tail -n {ITERATIONS} "$CSV_FILE" | awk -F',' '{{print $5}}' | awk '{{sum+=$1; sumsq+=$1^2; n++}} END {{
+    mean=sum/n; std=sqrt(sumsq/n - mean^2); ic95=1.96*std/sqrt(n)
+    printf "%.1f ± %.1f ms (IC95: [%.1f, %.1f])\\n", mean, std, mean-ic95, mean+ic95
+}}'
+
+echo -n "T(1) Split:  "
+tail -n {ITERATIONS} "$CSV_FILE" | awk -F',' '{{print $3}}' | awk '{{sum+=$1; sumsq+=$1^2; n++}} END {{
+    mean=sum/n; std=sqrt(sumsq/n - mean^2); ic95=1.96*std/sqrt(n)
+    printf "%.1f ± %.1f ms (IC95: [%.1f, %.1f])\\n", mean, std, mean-ic95, mean+ic95
+}}'
+
+echo -n "T(1) Exec:   "
+tail -n {ITERATIONS} "$CSV_FILE" | awk -F',' '{{print $5-$4}}' | awk '{{sum+=$1; sumsq+=$1^2; n++}} END {{
+    mean=sum/n; std=sqrt(sumsq/n - mean^2); ic95=1.96*std/sqrt(n)
+    printf "%.1f ± %.1f ms (IC95: [%.1f, %.1f])\\n", mean, std, mean-ic95, mean+ic95
+}}'
+
+echo ""
+echo "=== Résumé pour le modèle théorique ==="
+AVG_EXEC=$(tail -n {ITERATIONS} "$CSV_FILE" | awk -F',' '{{sum+=($5-$4)}} END {{printf "%.0f", sum/{ITERATIONS}}}')
+echo "T(1) = ${{AVG_EXEC}} ms  (temps d'exécution séquentiel)"
 '''
 
     with open(SCRIPT_PATH, 'w') as f:
