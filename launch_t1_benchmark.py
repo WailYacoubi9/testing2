@@ -1,94 +1,92 @@
 #!/usr/bin/env python3
 """
 Lance un benchmark pour mesurer T(1) - temps d'exécution avec 1 seul worker.
-Utile pour calculer le speedup théorique.
+Utilise exactement la même méthode que benchmark_job.sh
 """
 import subprocess
 import time
 import os
 import sys
 
-# Configuration
-TARGET_CLUSTER = "nova"      # Cluster cible (nova, ecotype, etc.)
+# Configuration (identique à benchmark_job.sh)
+TARGET_CLUSTER = "nova"
 NODES = 2                    # 2 nodes = 1 master + 1 worker
-WALLTIME = "00:15:00"        # 15 minutes suffisent pour 1 worker
-ITERATIONS = 5               # Nombre de répétitions pour moyenne fiable
+WALLTIME = "00:15:00"
+ITERATIONS = 3               # Même nombre que benchmark_job.sh
+INPUT_FILE = "huge_input.txt"  # Même fichier que benchmark_job.sh
 
 HOME_DIR = os.environ['HOME']
 SCRIPT_PATH = f"{HOME_DIR}/wordcount-distributed/benchmark_t1_job.sh"
 
 def create_benchmark_script():
-    """Crée le script de benchmark pour T(1)."""
+    """Crée le script de benchmark pour T(1) - identique à benchmark_job.sh."""
     script_content = f'''#!/bin/bash
 #
 # Benchmark T(1) - Mesure du temps d'exécution avec 1 worker
+# Utilise exactement la même méthode que benchmark_job.sh
 #
 
-cd {HOME_DIR}/wordcount-distributed
+PROJECT_DIR="$HOME/wordcount-distributed"
+INPUT_FILE="{INPUT_FILE}"
+CSV_FILE="$PROJECT_DIR/t1_results.csv"
+ITERATIONS={ITERATIONS}
 
-# Fichier de sortie
-OUTPUT_FILE="t1_results.csv"
+cd "$PROJECT_DIR"
 
-# Créer le header si le fichier n'existe pas
-if [ ! -f "$OUTPUT_FILE" ]; then
-    echo "Iteration,Nodes,Workers,Exec_Time_ms,Total_Time_ms" > "$OUTPUT_FILE"
+# En-tête du CSV (même format que benchmark_job.sh)
+if [ ! -f "$CSV_FILE" ]; then
+    echo "Nodes,Iteration,Split_Time_ms,Distrib_Exec_Start_ms,Total_Time_ms" > "$CSV_FILE"
 fi
 
-# Récupérer la liste des noeuds
-NODES_LIST=$(cat $OAR_NODEFILE | sort -u)
-MASTER=$(echo "$NODES_LIST" | head -1)
-WORKER=$(echo "$NODES_LIST" | tail -1)
+NODE_COUNT=$(cat $OAR_NODEFILE | uniq | wc -l)
+echo "=== Benchmark T(1) - $NODE_COUNT noeuds ($ITERATIONS iterations) ==="
 
-echo "=== Benchmark T(1) ==="
-echo "Master: $MASTER"
-echo "Worker: $WORKER"
-echo ""
+for ((i=1; i<=ITERATIONS; i++)); do
+    echo "------------------------------------------------"
+    echo "Iteration $i/$ITERATIONS..."
 
-# Compiler si nécessaire
-bash deploy/setup.sh > /dev/null 2>&1
+    # Appel du MÊME script que benchmark_job.sh
+    OUTPUT=$(bash deploy/run_nfs_home.sh "$INPUT_FILE" 2>&1)
 
-# Lancer le worker sur le noeud distant
-ssh $WORKER "cd {HOME_DIR}/wordcount-distributed && java -cp bin network.worker.WorkerNode $WORKER 3000" &
-WORKER_PID=$!
-sleep 3
+    if echo "$OUTPUT" | grep -q "Execution completed!"; then
 
-# Exécuter {ITERATIONS} itérations
-for i in $(seq 1 {ITERATIONS}); do
-    echo "Iteration $i/{ITERATIONS}..."
+        # Parsing identique à benchmark_job.sh
+        T_SPLIT=$(echo "$OUTPUT" | grep "FILE_SPLITTED" | awk '{{print $3}}' | tr -d 'ms')
+        T_TOTAL=$(echo "$OUTPUT" | grep "EXECUTION_COMPLETED" | awk '{{print $3}}' | tr -d 'ms')
+        T_EXEC_START=$(echo "$OUTPUT" | grep "DISTRIBUTED_EXECUTION_START" | awk '{{print $3}}' | tr -d 'ms')
 
-    START_TOTAL=$(date +%s%3N)
+        # Sécurité valeur vide
+        [ -z "$T_SPLIT" ] && T_SPLIT=0
+        [ -z "$T_TOTAL" ] && T_TOTAL=0
+        [ -z "$T_EXEC_START" ] && T_EXEC_START=0
 
-    # Exécution du wordcount distribué
-    java -cp bin scheduler.Main \\
-        {HOME_DIR}/wordcount-distributed/test/data_1gb.txt \\
-        "[$WORKER:3000]" \\
-        > /tmp/run_$i.log 2>&1
+        # Temps d'exécution pure = Total - Exec_Start
+        T_EXEC=$((T_TOTAL - T_EXEC_START))
 
-    END_TOTAL=$(date +%s%3N)
+        echo "Succes : Split=${{T_SPLIT}}ms, Exec=${{T_EXEC}}ms, Total=${{T_TOTAL}}ms"
+        echo "$NODE_COUNT,$i,$T_SPLIT,$T_EXEC_START,$T_TOTAL" >> "$CSV_FILE"
+    else
+        echo "Echec iteration $i"
+        echo "$OUTPUT" > "error_t1_iter_${{i}}.txt"
+    fi
 
-    TOTAL_TIME=$((END_TOTAL - START_TOTAL))
-
-    # Extraire le temps d'exécution depuis les logs si disponible
-    EXEC_TIME=$(grep -oP "Execution time: \\K[0-9]+" /tmp/run_$i.log 2>/dev/null || echo "$TOTAL_TIME")
-
-    echo "$i,2,1,$EXEC_TIME,$TOTAL_TIME" >> "$OUTPUT_FILE"
-    echo "  -> Total: ${{TOTAL_TIME}}ms, Exec: ${{EXEC_TIME}}ms"
-
-    sleep 2
+    sleep 5
 done
-
-# Cleanup
-kill $WORKER_PID 2>/dev/null
 
 echo ""
 echo "=== Résultats T(1) ==="
-echo "Fichier: $OUTPUT_FILE"
-cat "$OUTPUT_FILE"
+cat "$CSV_FILE"
 echo ""
 
-# Calculer la moyenne
-AVG=$(tail -n {ITERATIONS} "$OUTPUT_FILE" | awk -F',' '{{sum+=$5}} END {{print sum/{ITERATIONS}}}')
-echo "Moyenne T(1): ${{AVG}}ms"
+# Calculer les moyennes
+echo "=== Moyennes ==="
+AVG_TOTAL=$(tail -n {ITERATIONS} "$CSV_FILE" | awk -F',' '{{sum+=$5}} END {{printf "%.0f", sum/{ITERATIONS}}}')
+AVG_SPLIT=$(tail -n {ITERATIONS} "$CSV_FILE" | awk -F',' '{{sum+=$3}} END {{printf "%.0f", sum/{ITERATIONS}}}')
+AVG_EXEC=$(tail -n {ITERATIONS} "$CSV_FILE" | awk -F',' '{{sum+=($5-$4)}} END {{printf "%.0f", sum/{ITERATIONS}}}')
+
+echo "T(1) Total moyen:     ${{AVG_TOTAL}} ms"
+echo "T(1) Split moyen:     ${{AVG_SPLIT}} ms"
+echo "T(1) Exec moyen:      ${{AVG_EXEC}} ms  <-- Pour le modèle théorique"
 '''
 
     with open(SCRIPT_PATH, 'w') as f:
@@ -99,63 +97,51 @@ echo "Moyenne T(1): ${{AVG}}ms"
 
 def main():
     print("=" * 60)
-    print("LANCEMENT BENCHMARK T(1) - Temps d'exécution 1 worker")
+    print("BENCHMARK T(1) - Temps d'exécution avec 1 worker")
     print("=" * 60)
-    print(f"Cluster cible : {TARGET_CLUSTER}")
+    print(f"Cluster       : {TARGET_CLUSTER}")
     print(f"Nodes         : {NODES} (1 master + 1 worker)")
+    print(f"Fichier       : {INPUT_FILE} (même que benchmark_job.sh)")
     print(f"Itérations    : {ITERATIONS}")
-    print(f"Walltime      : {WALLTIME}")
+    print(f"Méthode       : deploy/run_nfs_home.sh (identique)")
     print("-" * 60)
 
-    # Créer le script de benchmark
     create_benchmark_script()
 
-    # Construire la commande oarsub
     cmd = ["oarsub"]
-
     if TARGET_CLUSTER:
         cmd.extend(["-p", f"cluster='{TARGET_CLUSTER}'"])
-
     cmd.extend(["-l", f"nodes={NODES},walltime={WALLTIME}"])
     cmd.append(SCRIPT_PATH)
 
-    print(f"\nSoumission du job...")
-    print(f"Commande: {' '.join(cmd)}")
+    print(f"\nCommande: {' '.join(cmd)}")
     print()
 
     try:
         result = subprocess.run(cmd, capture_output=True, text=True)
 
         if result.returncode == 0:
-            output_lines = result.stdout.splitlines()
             job_id = "Inconnu"
-            for line in output_lines:
+            for line in result.stdout.splitlines():
                 if "OAR_JOB_ID" in line:
                     job_id = line.split("=")[1]
 
-            print(f"Job soumis avec succès!")
-            print(f"Job ID: {job_id}")
+            print(f"Job soumis! ID: {job_id}")
             print()
             print("Suivi:")
             print(f"  oarstat -j {job_id}")
             print(f"  tail -f t1_results.csv")
         else:
-            print("ERREUR lors de la soumission")
-            print(f"Stderr: {result.stderr.strip()}")
+            print(f"ERREUR: {result.stderr.strip()}")
             sys.exit(1)
 
     except FileNotFoundError:
-        print("ERREUR: oarsub non trouvé (pas sur Grid5000?)")
-        print()
-        print("Pour tester localement, exécutez:")
-        print(f"  bash {SCRIPT_PATH}")
-        sys.exit(1)
-    except Exception as e:
-        print(f"Exception: {e}")
+        print("oarsub non trouvé - pas sur Grid5000?")
+        print(f"Pour tester: bash {SCRIPT_PATH}")
         sys.exit(1)
 
     print("-" * 60)
-    print("Une fois terminé, T(1) sera dans t1_results.csv")
+    print("Résultats dans: t1_results.csv")
 
 
 if __name__ == "__main__":
