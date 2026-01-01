@@ -48,3 +48,4 @@ Makefile.generated
 # NFS temporary files
 worker_nfs.log
 multisite_test.txt
+__pycache__/
